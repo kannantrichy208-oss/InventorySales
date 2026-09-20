@@ -1,38 +1,74 @@
-name: CI/CD Deployment Pipeline
+name: CI/CD Pipeline
 
-# 1. WHEN to trigger the pipeline
+# Build & test run on every push/PR to dev, staging, or main.
+# Deploy runs only on a direct push to one of those branches (or a manual
+# "Run workflow"), and picks the matching GitHub Environment automatically —
+# that's the "branch-based condition" replacing three separate files.
 on:
   push:
-    branches: [ main ]  # Triggers when code is pushed to the main branch
+    branches: [DEV, Staging, main]
+  pull_request:
+    branches: [DEV, Staging, main]
+  workflow_dispatch:
 
 jobs:
-  # JOB 1: Test the application (Continuous Integration)
   build-and-test:
-    runs-on: ubuntu-latest # The temporary cloud virtual machine to use
-    
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4 # Copies your repository code onto the runner
-
-    - name: Set up Environment
-      run: echo "Installing language runtimes (like Node.js, Python, or Java) goes here"
-
-    - name: Run Tests
-      run: echo "Running your automated tests..."
-
-  # JOB 2: Deploy to your server (Continuous Deployment)
-  deploy:
-    needs: build-and-test # Only runs if the testing job passes successfully
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Deploy to Server via SSH
-      uses: appleboy/ssh-action@v1.0.3 # A pre-built community tool to securely connect to servers
-      with:
-        host: ${{ secrets.SERVER_IP }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        script: |
-          cd /var/www/my-app
-          git pull origin main
-          echo "Restarting application server..."
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build --if-present
+
+  deploy:
+    needs: build-and-test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # This line IS the branch-based condition: whichever branch triggered the
+    # run selects the matching GitHub Environment (dev / staging / production).
+    # Each Environment (set up in repo Settings > Environments) holds its own
+    # secrets and variables under the SAME names, so nothing below needs an
+    # if/else for credentials, paths, or app names.
+    environment: >-
+      ${{
+        github.ref_name == 'main' && 'Production' ||
+        github.ref_name == 'Staging' && 'Staging' ||
+        'Development'
+      }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd ${{ vars.DEPLOY_PATH }}
+            git pull origin ${{ github.ref_name }}
+            npm ci --production
+            npm run build
+            pm2 restart ${{ vars.PM2_APP_NAME }}
+
+      - name: Deployment summary
+        if: always()
+        run: echo "Deploy (${{ github.ref_name }} -> ${{ job.status }})"
